@@ -1,136 +1,126 @@
 # Nostr Vanity Key Generator
 
-A command-line tool to mine Nostr public keys (npubs) with custom prefixes. Generate personalized Nostr identities that start with your chosen characters.
+Mine Nostr public keys (npubs) with custom vanity prefixes.
 
-## Features
-
-- Mine custom Nostr vanity keys (e.g., npub1cat...)
-- Optional encryption for secure key storage
-- Progress tracking with attempt rate display
-- Automatic saving of found keys
-- Support for multiple prefix targets in one run
-
-## Prerequisites
-
-- Node.js 16.0.0 or higher
-- NPM (Node Package Manager)
-
-## Installation
+## Setup
 
 ```bash
-# Clone or download this repository
-git clone [repository-url]
-
-# Install dependencies
 npm install
 ```
 
 ## Usage
 
-### Basic Usage
+Pass your desired prefixes as arguments:
 
 ```bash
-# Start mining without encryption
-node vanity-generator.js
+node vanity-generator.js g0lf eagle putt green wedge
+```
 
-# Start mining with encryption
-export ENCRYPTION_KEY='your-secure-key'
-node vanity-generator.js
+Comma-separated works too:
 
-# Read found keys
+```bash
+node vanity-generator.js g0lf,eagle,putt,green
+```
+
+Invalid bech32 characters are automatically detected and skipped.
+
+### Valid bech32 characters
+
+```
+q p z r y 9 x 8 g f 2 t v d w 0 s 3 j n 5 4 k h c e 6 m u a 7 l
+```
+
+Characters **not** available: `b i o 1`
+
+### Mining times (approximate)
+
+- 4 characters: minutes
+- 5 characters: hours
+- 6 characters: days
+- 7+ characters: weeks
+
+### Controls
+
+- `Ctrl+C` to stop and save progress
+- Resumes from where it left off on next run (loads saved keys)
+
+### Keep it running on macOS
+
+```bash
+caffeinate -i node vanity-generator.js g0lf eagle putt
+```
+
+## Encryption
+
+Keys are saved to `pow-keys.enc` using AES-256-CBC encryption. You should set a password via the `ENCRYPTION_KEY` environment variable.
+
+### Generate a secure password
+
+```bash
+openssl rand -base64 32
+```
+
+Save the output somewhere safe (password manager, etc). You'll need it to decrypt your keys later.
+
+### Mine with encryption (without exposing the password in shell history)
+
+```bash
+read -s ENCRYPTION_KEY && export ENCRYPTION_KEY
+```
+
+This prompts you to type/paste your password without echoing it to the terminal or saving it in shell history. Then run:
+
+```bash
+node vanity-generator.js g0lf eagle putt
+```
+
+### Read your keys
+
+With the same `ENCRYPTION_KEY` still exported:
+
+```bash
 node read-keys.js
 ```
 
-### Valid Characters
+### Clean up when done
 
-Vanity prefixes must use bech32 characters only:
-```
-qpzry9x8gf5tvuend2w0s3jn54khce6mua7l
-```
-
-Example valid prefixes:
-- `cat`
-- `max`
-- `sats`
-- `zap5`
-
-### Keeping Process Running (MacOS)
-
-Prevent system sleep while mining:
-```bash
-caffeinate -i node vanity-generator.js
-```
-
-Run in background:
-```bash
-nohup caffeinate -i node vanity-generator.js &
-```
-
-## Configuration
-
-Edit `vanity-generator.js` to set your desired prefixes:
-```javascript
-const desiredPrefixes = ['cat', 'sat', 'nostr'];  // Change these
-```
-
-## Security
-
-- Keys are saved to `pow-keys.enc` when encrypted, or `pow-keys.json` when unencrypted
-- Use encryption for better security
-- Never share your private keys (nsec)
-- Keep secure backups of your keys and encryption password
-
-## Mining Times
-
-Expected times (approximate):
-- 3 characters: minutes
-- 4 characters: hours
-- 5 characters: days
-- 6+ characters: weeks or longer
-
-Times vary based on your computer's speed and luck.
-
-## Commands Reference
+Unset the password from your shell session:
 
 ```bash
-# Set encryption key
-export ENCRYPTION_KEY='your-key-here'
-
-# Remove encryption key
 unset ENCRYPTION_KEY
-
-# Find running process
-ps aux | grep node
-
-# Kill running process
-kill <process_id>
 ```
 
-## Example Output
+### Full workflow
 
+```bash
+# 1. Generate a password (save this somewhere safe!)
+openssl rand -base64 32
+
+# 2. Set password without exposing it
+read -s ENCRYPTION_KEY && export ENCRYPTION_KEY
+# (paste your password, press enter)
+
+# 3. Mine
+node vanity-generator.js g0lf eagle putt green
+
+# 4. Read results
+node read-keys.js
+
+# 5. Clean up
+unset ENCRYPTION_KEY
 ```
-Starting search for npub with prefixes: cat, sat
-Tried 1000 combinations... (2356.2 attempts/sec)
-...
-🎉 Found matching key for prefix: cat
-npub: npub1catx...
-Time taken: 145.23 seconds
+
+## Reading keys
+
+```bash
+node read-keys.js
 ```
 
-## License
+Displays all found keys with their npub and nsec (private key). Make sure `ENCRYPTION_KEY` is set to the same password used during mining.
 
-MIT License
+## Security notes
 
-## Contributing
-
-Pull requests welcome! Please follow our contribution guidelines.
-
-## Support
-
-Create an issue for bugs or feature requests.
-
-## Acknowledgments
-
-Built using:
-- [nostr-tools](https://github.com/nbd-wtf/nostr-tools)
-- [bech32](https://github.com/bitcoinjs/bech32)
+- Never share your private keys (nsec)
+- Keep secure backups of both your keys file and encryption password
+- Use `read -s` to avoid passwords appearing in shell history
+- Don't run this script where others can see the terminal output of `read-keys.js`
