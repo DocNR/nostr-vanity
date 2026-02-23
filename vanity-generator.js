@@ -2,12 +2,17 @@ const { getPublicKey, nip19 } = require('nostr-tools');
 const crypto = require('crypto');
 const fs = require('fs').promises;
 const readline = require('readline');
+const path = require('path');
 
 const ALGORITHM = 'aes-256-cbc';
-const KEYS_FILE = 'pow-keys.enc';
+const CONFIG_FILE = '.vanity-config.json';
+const DEFAULT_KEYS_FILE = 'pow-keys.enc';
+const DEFAULT_KEYS_FILE_PLAIN = 'pow-keys.json';
 const BECH32_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
 let encryptionKey = '';
+let useEncryption = true;
+let keysFile = '';
 let foundKeys = new Map();
 let isRunning = true;
 
@@ -52,7 +57,6 @@ function askBech32(question) {
                 input += c.toLowerCase();
                 process.stdout.write(c.toLowerCase());
             }
-            // invalid chars are silently ignored
         };
 
         stdin.on('data', onData);
@@ -93,6 +97,33 @@ function askPassword(question) {
     });
 }
 
+function askYesNo(question) {
+    return new Promise(resolve => {
+        process.stdout.write(question + ' (y/n): ');
+        const stdin = process.stdin;
+        if (stdin.isTTY) stdin.setRawMode(true);
+        stdin.resume();
+        stdin.setEncoding('utf8');
+
+        const onData = (c) => {
+            if (c === '\u0003') {
+                process.stdout.write('\n');
+                process.exit(0);
+            }
+            const lower = c.toLowerCase();
+            if (lower === 'y' || lower === 'n') {
+                if (stdin.isTTY) stdin.setRawMode(false);
+                stdin.removeListener('data', onData);
+                stdin.pause();
+                process.stdout.write(lower + '\n');
+                resolve(lower === 'y');
+            }
+        };
+
+        stdin.on('data', onData);
+    });
+}
+
 // --- Crypto ---
 
 function generatePrivateKey() {
@@ -119,26 +150,56 @@ function decrypt(encrypted) {
 
 // --- Key storage ---
 
-async function saveKeys(keys) {
+function keysToJson(keys) {
     const keysData = {};
     keys.forEach((value, prefix) => {
         keysData[prefix] = {
             privateKey: value.privateKey,
             publicKey: value.publicKey,
             npub: value.npub,
-            foundAt: new Date().toISOString()
+            foundAt: value.foundAt || new Date().toISOString()
         };
     });
-    const encrypted = encrypt(JSON.stringify(keysData, null, 2));
-    await fs.writeFile(KEYS_FILE, JSON.stringify(encrypted, null, 2));
+    return keysData;
+}
+
+async function saveConfig() {
+    const config = { keysFile, encrypted: useEncryption };
+    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+async function saveKeys(keys) {
+    const keysData = keysToJson(keys);
+    const json = JSON.stringify(keysData, null, 2);
+
+    // Backup existing file before overwriting
+    try {
+        await fs.access(keysFile);
+        await fs.copyFile(keysFile, keysFile + '.bak');
+    } catch {}
+
+    if (useEncryption) {
+        const encrypted = encrypt(json);
+        await fs.writeFile(keysFile, JSON.stringify(encrypted, null, 2));
+    } else {
+        await fs.writeFile(keysFile, json);
+    }
+    await saveConfig();
 }
 
 async function loadSavedKeys() {
     try {
-        const fileContent = await fs.readFile(KEYS_FILE, 'utf8');
-        const encrypted = JSON.parse(fileContent);
-        const decrypted = decrypt(encrypted);
-        const keysData = JSON.parse(decrypted);
+        const fileContent = await fs.readFile(keysFile, 'utf8');
+        let keysData;
+
+        if (useEncryption) {
+            const encrypted = JSON.parse(fileContent);
+            const decrypted = decrypt(encrypted);
+            keysData = JSON.parse(decrypted);
+        } else {
+            keysData = JSON.parse(fileContent);
+        }
+
         const loadedKeys = new Map();
         Object.entries(keysData).forEach(([prefix, value]) => {
             loadedKeys.set(prefix, value);
@@ -146,9 +207,10 @@ async function loadSavedKeys() {
         return loadedKeys;
     } catch (error) {
         if (error.code === 'ENOENT') return new Map();
-        if (error.code === 'ERR_OSSL_BAD_DECRYPT' || error.message.includes('bad decrypt')) {
-            console.log('Wrong password for existing keys file. Starting fresh.');
-            return new Map();
+        if (error.message.includes('bad decrypt')) {
+            console.log('\nWrong password — cannot decrypt existing keys file.');
+            console.log('Aborting to protect your saved keys.');
+            process.exit(1);
         }
         throw error;
     }
@@ -178,17 +240,17 @@ function parsePrefixes(input) {
 
 function parseTime(input) {
     const trimmed = input.trim().toLowerCase();
-    if (!trimmed || trimmed === '0') return null; // run forever
+    if (!trimmed || trimmed === '0') return null;
 
     const match = trimmed.match(/^(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|s|sec|secs|seconds?)?$/);
     if (!match) return null;
 
     const num = parseInt(match[1]);
-    const unit = match[2] || 'm'; // default to minutes
+    const unit = match[2] || 'm';
 
     if (unit.startsWith('s')) return num * 1000;
     if (unit.startsWith('h')) return num * 60 * 60 * 1000;
-    return num * 60 * 1000; // minutes
+    return num * 60 * 1000;
 }
 
 function formatMs(ms) {
@@ -283,6 +345,8 @@ async function generateVanityNpub(prefixes, timeLimit) {
             } else {
                 process.stdout.write(`\r${attempts.toLocaleString()} attempts — ${elapsed} elapsed`);
             }
+            // Yield to event loop so Ctrl+C can be processed
+            await new Promise(resolve => setImmediate(resolve));
         }
     }
 
@@ -294,11 +358,18 @@ async function generateVanityNpub(prefixes, timeLimit) {
 async function main() {
     console.log('=== Nostr Vanity npub Miner ===\n');
 
-    // 1. Password
-    encryptionKey = await askPassword('Encryption password: ');
-    if (!encryptionKey) {
-        console.log('No password entered. Exiting.');
-        process.exit(1);
+    // 1. Encryption
+    useEncryption = await askYesNo('Encrypt keys with a password?');
+
+    if (useEncryption) {
+        encryptionKey = await askPassword('Password: ');
+        if (!encryptionKey) {
+            console.log('No password entered. Exiting.');
+            process.exit(1);
+        }
+        keysFile = path.resolve(process.cwd(), DEFAULT_KEYS_FILE);
+    } else {
+        keysFile = path.resolve(process.cwd(), DEFAULT_KEYS_FILE_PLAIN);
     }
 
     // 2. Prefixes
@@ -314,14 +385,13 @@ async function main() {
     console.log(`\nWill search for: ${prefixes.join(', ')}`);
 
     // 3. Time limit
-    const timeInput = await ask('\nTime limit (e.g. 30m, 2h, or press Enter for unlimited): ');
+    const timeInput = await ask('\nTime limit (e.g. 30m, 2h, or Enter for unlimited): ');
     const timeLimit = parseTime(timeInput);
 
     // 4. Instructions
     console.log('\n---');
-    console.log('Press Ctrl+C anytime to stop and save found keys.');
-    console.log(`Keys are saved to: ${KEYS_FILE}`);
-    console.log('To read your keys later, run: node read-keys.js');
+    console.log('Ctrl+C to stop and save.');
+    console.log('When done, run: node read-keys.js');
     console.log('---');
 
     // 5. Mine
@@ -333,8 +403,8 @@ async function main() {
         results.forEach((value, prefix) => {
             console.log(`  ${value.npub}`);
         });
-        console.log(`\nKeys saved to ${KEYS_FILE}`);
-        console.log('Run "node read-keys.js" and enter your password to view them.');
+        console.log(`\nKeys saved to ${keysFile}`);
+        console.log('Run "node read-keys.js" to view them.');
     } else {
         console.log('\n\nNo keys found this session.');
     }

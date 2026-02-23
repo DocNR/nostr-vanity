@@ -1,10 +1,10 @@
 const crypto = require('crypto');
 const fs = require('fs').promises;
-const readline = require('readline');
+const path = require('path');
 const { nip19 } = require('nostr-tools');
 
 const ALGORITHM = 'aes-256-cbc';
-const KEYS_FILE = 'pow-keys.enc';
+const CONFIG_FILE = '.vanity-config.json';
 
 function askPassword(question) {
     return new Promise(resolve => {
@@ -59,22 +59,52 @@ function hexToUint8Array(hexString) {
     return bytes;
 }
 
+async function loadConfig() {
+    try {
+        const content = await fs.readFile(CONFIG_FILE, 'utf8');
+        return JSON.parse(content);
+    } catch {
+        return null;
+    }
+}
+
 async function main() {
-    const password = await askPassword('Encryption password: ');
-    if (!password) {
-        console.log('No password entered.');
+    const config = await loadConfig();
+
+    if (!config) {
+        console.log('No keys found yet. Run the miner first: node vanity-generator.js');
         process.exit(1);
     }
 
+    const keysFile = config.keysFile;
+    const isEncrypted = config.encrypted;
+
+    console.log(`Reading keys from: ${keysFile}\n`);
+
+    let password = '';
+    if (isEncrypted) {
+        password = await askPassword('Password: ');
+        if (!password) {
+            console.log('No password entered.');
+            process.exit(1);
+        }
+    }
+
     try {
-        const fileContent = await fs.readFile(KEYS_FILE, 'utf8');
-        const encrypted = JSON.parse(fileContent);
-        const decrypted = decrypt(password, encrypted);
-        const keys = JSON.parse(decrypted);
+        const fileContent = await fs.readFile(keysFile, 'utf8');
+        let keys;
+
+        if (isEncrypted) {
+            const encData = JSON.parse(fileContent);
+            const decrypted = decrypt(password, encData);
+            keys = JSON.parse(decrypted);
+        } else {
+            keys = JSON.parse(fileContent);
+        }
 
         const entries = Object.entries(keys);
         if (entries.length === 0) {
-            console.log('\nNo keys found.');
+            console.log('No keys found.');
             return;
         }
 
@@ -91,7 +121,7 @@ async function main() {
         });
     } catch (error) {
         if (error.code === 'ENOENT') {
-            console.log(`\nNo keys file found (${KEYS_FILE}). Run the miner first.`);
+            console.log(`File not found: ${keysFile}`);
         } else if (error.message.includes('bad decrypt')) {
             console.log('\nWrong password.');
         } else {
